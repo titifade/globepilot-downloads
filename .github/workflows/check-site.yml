@@ -1,0 +1,50 @@
+name: Verifier le site independant
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/check-site.yml]
+permissions:
+  contents: read
+jobs:
+  verification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Verifier les pages, fichiers et protections publiques
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {appendFileSync} from 'node:fs';
+          const base='https://globepilot-independent.liiamjuliee.workers.dev';
+          const checks=[];
+          async function request(path,options={}) {
+            return fetch(base+path,{redirect:'manual',...options,signal:AbortSignal.timeout(20000)});
+          }
+          async function check(label,fn) {
+            try {await fn();checks.push([label,true]);console.log('OK: '+label);}
+            catch(e){checks.push([label,false]);console.error('ECHEC: '+label+' — '+e.message);}
+          }
+          await check('Accueil',async()=>{const r=await request('/');assert.equal(r.status,200);assert.match(await r.text(),/GlobePilot/i)});
+          await check('Page de telechargement',async()=>{const r=await request('/telecharger');assert.equal(r.status,200);assert.match(await r.text(),/GlobePilot/i)});
+          await check('Version Windows disponible',async()=>{const r=await request('/api/release');assert.equal(r.status,200);const d=await r.json();assert.equal(d.ready,true)});
+          for(const arch of ['arm64','x86_64'])await check('Metadonnees Mac '+arch,async()=>{const r=await request('/api/download/mac?arch='+arch,{method:'HEAD'});assert.equal(r.status,200);assert.ok(Number(r.headers.get('content-length'))>1000000);assert.match(r.headers.get('etag')||'',/github-/)});
+          await check('API createur fermee sans session',async()=>{const r=await request('/api/admin');assert.equal(r.status,403)});
+          await check('Entetes ChatGPT seuls refuses',async()=>{const r=await request('/api/admin',{headers:{'oai-authenticated-user-id':'spoofed-user','oai-authenticated-user-email':'spoofed@example.invalid'}});assert.equal(r.status,403)});
+          await check('Nouvelle page privee accessible seulement apres connexion',async()=>{
+            let last;
+            for(let n=0;n<25;n++){
+              last=await request('/admin/hebergement');
+              if([302,303,307,308].includes(last.status)){
+                const dest=new URL(last.headers.get('location'),base);
+                assert.equal(dest.origin,base);assert.equal(dest.pathname,'/connexion');return;
+              }
+              if(last.status!==404)break;
+              await new Promise(resolve=>setTimeout(resolve,10000));
+            }
+            assert.fail('Redirection vers la connexion attendue; HTTP '+last.status);
+          });
+          const summary=['## Verification GlobePilot','',...checks.map(([name,ok])=>'- '+(ok?'✅':'❌')+' '+name),'','Ces controles publics ne valident pas la connexion par e-mail, les paiements ni le parcours createur authentifie.'];
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,summary.join('\n'));
+          if(checks.some(([,ok])=>!ok))process.exitCode=1;
+          JS
