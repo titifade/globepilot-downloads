@@ -1,0 +1,57 @@
+name: Transfer existing Mac installers
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/transfer-mac.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: transfer-mac-0140
+  cancel-in-progress: false
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download and verify existing public installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import urllib.request, pathlib, hashlib
+          items=[
+            ('arm64','GlobePilot-Mac-0.14.0-AppleSilicon.dmg',224863809,'"326b96e66e7a9f6f87230eff06b1d647-27"'),
+            ('x86_64','GlobePilot-Mac-0.14.0-Intel.dmg',236610480,'"4da17e7ddebeec794d1111f5c1692c54-29"'),
+          ]
+          for arch,name,size,etag in items:
+            req=urllib.request.Request('https://globepilot.fr/api/download/mac?arch='+arch,headers={'User-Agent':'Mozilla/5.0'})
+            with urllib.request.urlopen(req,timeout=120) as response:
+              if response.status!=200 or response.headers.get('ETag')!=etag:
+                raise RuntimeError('Source changed; migration stopped')
+              digest=hashlib.sha256()
+              total=0
+              with open(name,'wb') as out:
+                while True:
+                  block=response.read(1024*1024)
+                  if not block:break
+                  total+=len(block)
+                  if total>size:raise RuntimeError('Unexpected file size')
+                  digest.update(block);out.write(block)
+            if total!=size:raise RuntimeError('Incomplete download')
+            with open(name,'rb') as source:
+              source.seek(-512,2)
+              if source.read(4)!=b'koly':raise RuntimeError('Invalid DMG footer')
+            print(name,total,digest.hexdigest())
+          PY
+      - name: Publish existing Mac installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view v0.14.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release already exists; no files replaced."
+            exit 0
+          fi
+          gh release create v0.14.0 GlobePilot-Mac-0.14.0-AppleSilicon.dmg GlobePilot-Mac-0.14.0-Intel.dmg --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "GlobePilot Mac 0.14.0" --notes "Migration des installateurs Mac déjà publiés. Choisissez Apple Silicon ou Intel selon votre Mac. Cette publication ne certifie ni une notarisation Apple ni la compatibilité avec toutes les versions iOS." --latest=false
